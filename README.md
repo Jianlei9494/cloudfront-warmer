@@ -20,22 +20,24 @@
 ### 一键部署（推荐，约 3 分钟）
 
 1. 登录 AWS 控制台，点右上角的 **CloudShell** 图标（`>_`）。
-2. 在 CloudShell 菜单「操作 → 上传文件」上传 `install.sh`。
-3. 运行：
+2. 粘贴这一行并回车（下载最新的 `install.sh` 并运行，不需要上传任何文件）：
    ```bash
-   bash install.sh
+   curl -sLO https://raw.githubusercontent.com/Jianlei9494/cf-warmer/main/install.sh && bash install.sh
    ```
-4. 结束时屏幕上会显示**面板地址**和**自动生成的口令**，保存好，打开地址登录即可。
+3. 结束时屏幕上会显示**面板地址**和**自动生成的口令**，保存好，打开地址登录即可。
+
+CloudShell 访问不了 GitHub 时，从 https://raw.githubusercontent.com/Jianlei9494/cf-warmer/main/install.sh 下载文件，在「操作 → 上传文件」上传后运行 `bash install.sh`。
+下面的 `bash install.sh` 都假定文件已在 CloudShell 里（第一次运行后就在了）；想拿最新版就先 `curl -sLO https://raw.githubusercontent.com/Jianlei9494/cf-warmer/main/install.sh`。
 
 - 想自己定口令：`CFW_PASSWORD='至少12位的口令' bash install.sh`
 - 只允许部分域名：`CFW_ALLOWED_HOSTS='cdn.example.com' bash install.sh`（默认不限制）
 - 忘记口令 / 升级到新版本：重新运行 `bash install.sh`（会生成新口令，预热记录保留）
-- 卸载：`bash install.sh uninstall`
+- 卸载：`bash install.sh uninstall`（文件不在了就先 `curl -sLO https://raw.githubusercontent.com/Jianlei9494/cf-warmer/main/install.sh`）
 
 ### 手动部署（不用命令行）
 
 1. 登录 AWS 控制台，切换到 **us-east-1（美东-弗吉尼亚）**（其他区域也可以，面板就建在你选的区域）。
-2. 打开 **CloudFormation → 创建堆栈 → 使用新资源**，选「上传模板文件」，上传 `cf-warmer.template.json`。
+2. 先下载模板 https://raw.githubusercontent.com/Jianlei9494/cf-warmer/main/cf-warmer.template.json ，再打开 **CloudFormation → 创建堆栈 → 使用新资源**，选「上传模板文件」上传它。
 3. 堆栈名称填 `cf-warmer`；**面板访问口令**填一个至少 12 位的口令。其余参数保持默认即可。
    「允许预热的域名」默认留空，即不限制；如只想允许自己的域名，可在这里填写（逗号分隔），之后也能通过「更新堆栈」修改。
 4. 一路「下一步」，最后勾选「我确认 AWS CloudFormation 可能创建 IAM 资源」，点「提交」。
@@ -178,5 +180,9 @@ python3 build_template.py          # 重新生成模板
 python3 build_template.py --check  # 检查模板是否与源码一致
 ```
 
-如需「一键部署」链接，把模板上传到公开可读的 S3 后，链接格式为：
+**发布**：公开仓库 https://github.com/Jianlei9494/cf-warmer 的 `main` 就是客户部署时下载的版本（`https://raw.githubusercontent.com/Jianlei9494/cf-warmer/main/install.sh`），
+推送即生效。改完先 `python3 build_template.py --check` 并在测试账号跑通，再推送。
+本目录是开发源，公开仓库是发布副本，两边内容保持一致（同步方法：把 `git ls-files` 列出的文件复制到公开仓库后提交）。
+
+如需「一键部署」链接，把模板上传到公开可读的 S3 后，链接格式为（CloudFormation 只接受 S3 地址，不接受 GitHub 地址）：
 `https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?stackName=cf-warmer&templateURL=<模板的 S3 HTTPS 地址>`

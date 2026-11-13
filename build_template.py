@@ -229,7 +229,7 @@ def build() -> str:
 INSTALL_OUT = HERE / "install.sh"
 INSTALL_HEAD = r'''#!/usr/bin/env bash
 # cf-warmer 一键部署脚本（由 build_template.py 生成，不要手改）。
-# 在 AWS CloudShell 里运行：bash install.sh
+# 在 AWS CloudShell 里运行：curl -sLO https://raw.githubusercontent.com/Jianlei9494/cf-warmer/main/install.sh && bash install.sh
 #   卸载：bash install.sh uninstall
 # 可选环境变量：
 #   CFW_REGION         面板所在区域，默认 us-east-1
