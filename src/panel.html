@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>CloudFront 缓存预热</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--text:#1f2328;--muted:#656d76;--ok:#1a7f37;--okbg:#dafbe1;--bad:#cf222e;--badbg:#ffebe9;--warn:#9a6700;--warnbg:#fff8c5;--pri:#0969da}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8d96a0;--ok:#3fb950;--okbg:#12261e;--bad:#f85149;--badbg:#2d1214;--warn:#d29922;--warnbg:#2b2111;--pri:#4493f8}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--card)}
+header h1{font-size:16px;margin:0}main{max-width:1200px;margin:0 auto;padding:20px;display:grid;grid-template-columns:1fr 280px;gap:20px}
+@media (max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
+.card h2{font-size:14px;margin:0 0 12px}label{display:block;font-weight:600;margin:12px 0 6px}
+textarea,input[type=text],input[type=password],select{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}
+textarea{min-height:120px;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:center}.row label{display:inline-flex;gap:6px;align-items:center;font-weight:400;margin:0}
+button{padding:8px 16px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;cursor:pointer}
+button.pri{background:var(--pri);border-color:var(--pri);color:#fff}button:disabled{opacity:.5;cursor:not-allowed}
+.muted{color:var(--muted);font-size:13px}.err{color:var(--bad)}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}.mono{font-family:ui-monospace,Menlo,monospace;word-break:break-all}
+.grid{overflow-x:auto}.cell{display:inline-block;min-width:64px;padding:2px 6px;border-radius:4px;font-size:12px;text-align:center;cursor:default}
+.c-hit{background:var(--okbg);color:var(--ok)}.c-ok{background:var(--warnbg);color:var(--warn)}.c-bad{background:var(--badbg);color:var(--bad)}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;margin:2px}
+.hist{cursor:pointer;padding:8px;border-radius:6px;border:1px solid transparent}.hist:hover{border-color:var(--line)}
+details summary{cursor:pointer;color:var(--muted);margin-top:12px}
+.hint{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 12px 10px;margin:8px 0;font-size:13px}.hint ol{margin:8px 0;padding-left:20px}.hint li{margin:4px 0}.hidden{display:none}
+#login{max-width:360px;margin:80px auto}
+</style>
+</head>
+<body>
+<div id="login" class="card hidden">
+  <h2>CloudFront 缓存预热</h2>
+  <label for="pw">访问口令</label>
+  <input id="pw" type="password" autocomplete="current-password">
+  <p id="loginErr" class="err"></p>
+  <button class="pri" id="loginBtn">登录</button>
+  <p class="muted">口令是部署时在 CloudFormation 里填写的 AccessPassword。</p>
+</div>
+
+<div id="app" class="hidden">
+<header><h1>CloudFront 缓存预热</h1><div><span id="regionSummary" class="muted"></span> <button id="logout">退出</button></div></header>
+<main>
+<section>
+  <div class="card">
+    <h2>1. 选择要预热的内容</h2>
+    <div class="row" style="margin-bottom:8px">
+      <label><input type="radio" name="src" value="urls" checked> 填写地址</label>
+      <label><input type="radio" name="src" value="dir"> 按目录（S3 源站）</label>
+    </div>
+    <div id="srcUrls">
+      <textarea id="urls" placeholder="每行一个完整 https 地址，例如&#10;https://cdn.example.com/app.js&#10;https://cdn.example.com/video/seg-001.ts"></textarea>
+      <p class="muted" id="limits"></p>
+    </div>
+    <div id="srcDir" class="hidden">
+      <div class="row" style="margin-bottom:4px">
+        <label><input type="radio" name="dsrc" value="pick" checked> 从本账号的分发里选</label>
+        <label><input type="radio" name="dsrc" value="manual"> 手动填写（分发或存储桶在其他 AWS 账号）</label>
+      </div>
+      <div id="dPick">
+        <label for="dist">CloudFront 分发</label>
+        <select id="dist"><option value="">加载中…</option></select>
+        <label for="host">访问域名</label>
+        <select id="host"></select>
+      </div>
+      <div id="dManual" class="hidden">
+        <details class="hint" open>
+          <summary>这三项从哪里拿（打开分发所在账号的 CloudFront 控制台 → 点进分发）</summary>
+          <ol>
+            <li><b>访问域名</b>：「常规」页签的「分发域名名称」（如 <span class="mono">d1a2b3c4d5e6f7.cloudfront.net</span>），或「备用域名」里你给访客用的域名（如 <span class="mono">cdn.example.com</span>）。只填域名，不要 https://。</li>
+            <li><b>存储桶名称</b>：「源」页签 → 选中源 →「源域」，形如 <span class="mono">my-site-bucket.s3.ap-southeast-1.amazonaws.com</span>。可以整段粘贴，工具会自动取出存储桶名 <span class="mono">my-site-bucket</span>。</li>
+            <li><b>源站路径</b>：同一个源的「源路径」（Origin path），如 <span class="mono">/www</span>；控制台里是空的就留空。</li>
+          </ol>
+          <div class="muted">怎么对应：访客访问 <span class="mono">https://cdn.example.com/static/v2/app.js</span>，CloudFront 去存储桶里取 <span class="mono">www/static/v2/app.js</span>（源路径 + 访问路径）。</div>
+        </details>
+        <label for="mHost">访问域名</label>
+        <input type="text" id="mHost" placeholder="cdn.example.com 或 d1a2b3c4d5e6f7.cloudfront.net">
+        <label for="mBucket">存储桶名称（可直接粘贴「源域」）</label>
+        <input type="text" id="mBucket" placeholder="my-site-bucket 或 my-site-bucket.s3.ap-southeast-1.amazonaws.com">
+        <label for="mOpath">源站路径（没有就留空）</label>
+        <input type="text" id="mOpath" placeholder="/www">
+        <p class="muted">存储桶不在本账号时，需要桶的主人在桶策略里允许本工具列出文件名；第一次预览时如果没有权限，页面会给出要加的那段策略。</p>
+      </div>
+      <label for="dir">目录</label>
+      <input type="text" id="dir" placeholder="/static/v2/" value="/">
+      <p class="muted">填访客访问时的路径部分。例：要预热 <span class="mono">https://cdn.example.com/static/v2/</span> 下的所有文件，就填 <span class="mono">/static/v2/</span>；整站填 <span class="mono">/</span>。</p>
+      <p id="mapPreview" class="mono" style="font-size:12px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;display:none"></p>
+      <p class="muted" id="dirLimits">会列出该目录在 S3 源站里的全部文件（含子目录）。源站必须是 S3 存储桶（本账号或已授权的其他账号）；若用了 CloudFront Functions / Lambda@Edge 改写路径，换算出的地址可能不对，预热时会如实报失败。</p>
+    </div>
+
+    <label>预热范围</label>
+    <div class="row">
+      <label><input type="radio" name="mode" value="full" checked> 全覆盖：每个区域都热（各地首次访问更快）</label>
+      <label><input type="radio" name="mode" value="economy"> 经济：只从一个区域热</label>
+      <select id="ecoRegion" style="width:auto"></select>
+    </div>
+    <p class="muted">经济模式适合已开启 Origin Shield 的分发：源盾拿到对象后，其他区域首次访问不再回源，流量只有全覆盖的一小部分。</p>
+
+    <details>
+      <summary>高级选项</summary>
+      <label>压缩格式（分发开了压缩时，每种格式单独缓存）</label>
+      <div class="row">
+        <label><input type="checkbox" class="enc" value="gzip, deflate, br" checked> 浏览器默认</label>
+        <label><input type="checkbox" class="enc" value="br"> 仅 br</label>
+        <label><input type="checkbox" class="enc" value="gzip"> 仅 gzip</label>
+        <label><input type="checkbox" class="enc" value="identity"> 不压缩</label>
+      </div>
+      <label>额外请求头（每行「名称: 值」，如签名 Cookie）</label>
+      <textarea id="headers" style="min-height:60px" placeholder="Cookie: CloudFront-Policy=..."></textarea>
+      <div class="row" style="margin-top:12px"><label><input type="checkbox" id="verify" checked> 预热后复查是否已命中缓存</label></div>
+    </details>
+
+    <div class="row" style="margin-top:16px"><button class="pri" id="precheckBtn">预检并估算流量</button><span id="busy" class="muted"></span></div>
+    <p id="formErr" class="err"></p>
+  </div>
+
+  <div class="card hidden" id="preCard">
+    <h2>2. 确认</h2>
+    <table><thead><tr><th>地址</th><th>状态</th><th>大小</th></tr></thead><tbody id="preBody"></tbody></table>
+    <p id="estimate"></p>
+    <div class="row">
+      <button class="pri" id="warmBtn">立即预热</button>
+      <span class="muted">或</span>
+      <input type="datetime-local" id="schedAt" style="width:auto">
+      <button id="schedBtn">预定在这个时间执行</button>
+      <button id="cancelBtn">取消</button>
+    </div>
+    <p class="muted" id="schedHint">预定只执行一次，时间按你电脑的时区（<span id="tz"></span>），最多提前 30 天。到点后会重新预检再预热，误差约 1 分钟；执行时不需要打开本页面。</p>
+    <p id="schedMsg"></p>
+  </div>
+
+  <div class="card hidden" id="resCard">
+    <h2 id="resTitle">结果</h2>
+    <p id="resSummary"></p>
+    <div class="row muted" style="margin-bottom:8px">
+      <span><span class="cell c-hit">已命中</span> 复查已命中缓存</span>
+      <span><span class="cell c-ok">已下载</span> 下载完成，未复查或复查未命中</span>
+      <span><span class="cell c-bad">失败</span> 鼠标悬停看原因</span>
+    </div>
+    <div class="grid" id="resGrid"></div>
+  </div>
+</section>
+
+<aside>
+  <div class="card"><h2>区域状态</h2><div id="regions" class="muted">加载中…</div></div>
+  <div class="card"><h2>后台任务</h2><div id="dirJobs" class="muted">加载中…</div></div>
+  <div class="card"><h2>预定任务</h2><div id="schedules" class="muted">加载中…</div></div>
+  <div class="card"><h2>最近记录</h2><div id="history" class="muted">加载中…</div></div>
+</aside>
+</main>
+</div>
+
+<script>
+const NAMES={"us-east-1":"美东-弗吉尼亚","us-east-2":"美东-俄亥俄","us-west-1":"美西-加州","us-west-2":"美西-俄勒冈","eu-central-1":"欧洲-法兰克福","eu-west-1":"欧洲-爱尔兰","eu-west-2":"欧洲-伦敦","eu-west-3":"欧洲-巴黎","ap-northeast-1":"亚太-东京","ap-northeast-2":"亚太-首尔","ap-southeast-1":"亚太-新加坡","ap-southeast-2":"亚太-悉尼","ap-south-1":"亚太-孟买","ap-east-1":"亚太-香港","sa-east-1":"南美-圣保罗","me-central-1":"中东-阿联酋","ca-central-1":"加拿大"};
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt=n=>{if(n==null)return"未知";const u=["B","KB","MB","GB","TB"];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return(i?n.toFixed(1):n)+" "+u[i]};
+const rname=r=>NAMES[r]?`${NAMES[r]}`:r;
+let cfg=null,pending=null;
+
+async function api(path,body,method){
+  const opt={method:method||(body?"POST":"GET"),headers:{"Content-Type":"application/json"}};
+  const t=sessionStorage.getItem("cfw");if(t)opt.headers.Authorization="Bearer "+t;
+  if(body)opt.body=JSON.stringify(body);
+  const r=await fetch(path,opt);let j={};try{j=await r.json()}catch(e){}
+  if(r.status===401&&path!=="/api/login"){sessionStorage.removeItem("cfw");show(false);throw new Error("登录已过期，请重新登录")}
+  if(!r.ok){const e=new Error(j.error||("HTTP "+r.status));e.data=j;throw e}
+  return j;
+}
+function show(authed){$("login").classList.toggle("hidden",authed);$("app").classList.toggle("hidden",!authed);if(authed)init()}
+
+$("loginBtn").onclick=async()=>{
+  $("loginErr").textContent="";$("loginBtn").disabled=true;
+  try{const j=await api("/api/login",{password:$("pw").value});sessionStorage.setItem("cfw",j.token);$("pw").value="";show(true)}
+  catch(e){$("loginErr").textContent=e.message}finally{$("loginBtn").disabled=false}
+};
+$("pw").onkeydown=e=>{if(e.key==="Enter")$("loginBtn").click()};
+$("logout").onclick=()=>{sessionStorage.removeItem("cfw");show(false)};
+
+async function init(){
+  try{
+    cfg=await api("/api/config");
+    const ready=cfg.regions.filter(r=>r.ready);
+    $("regionSummary").textContent=`${ready.length}/${cfg.regions.length} 个区域就绪`;
+    const WHY={not_enabled:"该区域未在你的 AWS 账号中启用",not_deployed:"该区域未部署预热函数",pending:"正在部署，稍后刷新",error:"状态查询失败，稍后刷新"};
+    $("regions").innerHTML=cfg.regions.map(r=>`<div style="margin-bottom:4px">${r.ready?"✅":"⚠️"} ${esc(rname(r.region))} <span class="muted mono">${esc(r.region)}</span>${r.ready?"":`<div class="err" style="font-size:12px;margin-left:22px">${esc(WHY[r.reason]||"未就绪")}</div>`}</div>`).join("");
+    const why=new Set(cfg.regions.filter(r=>!r.ready).map(r=>r.reason));
+    const tips=[];
+    if(why.has("not_enabled"))tips.push("启用方法：AWS 控制台右上角账号名 →「账户」→「AWS 区域」→ 启用对应区域（免费，通常几分钟生效），然后在 CloudShell 重新运行 bash install.sh（会生成新口令；想保留原口令用 CFW_PASSWORD=原口令 bash install.sh）。");
+    if(why.has("not_deployed"))tips.push("在 CloudShell 重新运行 bash install.sh 即可补部署。");
+    if(tips.length)$("regions").innerHTML+=`<p class="muted" style="font-size:12px">${tips.map(esc).join("<br>")}<br>未就绪的区域会被自动跳过，不影响其他区域预热。</p>`;
+    $("ecoRegion").innerHTML=ready.map(r=>`<option value="${esc(r.region)}"${r.region==="us-east-1"?" selected":""}>${esc(rname(r.region))}</option>`).join("");
+    $("limits").textContent=`超过 ${cfg.syncMaxUrls} 个地址时自动转为后台分批执行，不需要开着页面`+(cfg.maxObjectMB?`；单个对象上限 ${cfg.maxObjectMB} MB（你设置的）`:"")+(cfg.allowedHosts.length?`；只允许这些域名：${cfg.allowedHosts.join("、")}`:"");
+  }catch(e){$("regions").innerHTML=`<span class="err">${esc(e.message)}</span>`}
+  loadHistory();loadSchedules();loadDirJobs();
+}
+
+function form(){
+  const urls=$("urls").value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const mode=document.querySelector("input[name=mode]:checked").value;
+  const encodings=[...document.querySelectorAll(".enc:checked")].map(x=>x.value);
+  return{urls,mode,economyRegion:$("ecoRegion").value,encodings:encodings.length?encodings:["gzip, deflate, br"],headers:$("headers").value,verify:$("verify").checked};
+}
+
+const srcKind=()=>document.querySelector("input[name=src]:checked").value;
+document.querySelectorAll("input[name=src]").forEach(r=>r.onchange=()=>{
+  const d=srcKind()==="dir";$("srcUrls").classList.toggle("hidden",d);$("srcDir").classList.toggle("hidden",!d);
+  $("precheckBtn").textContent=d?"列出文件并估算流量":"预检并估算流量";$("preCard").classList.add("hidden");pending=null;
+  if(d&&!dists)loadDists();
+});
+let dists=null;
+async function loadDists(){
+  try{const j=await api("/api/distributions");dists=j.distributions;
+    $("dirLimits").textContent=`会列出该目录在 S3 源站里的全部文件（含子目录），${j.maxDirFiles?`一次最多 ${j.maxDirFiles} 个（你设置的），`:"文件数不限，"}文件多时后台分批执行。源站必须是 S3 存储桶（本账号或已授权的其他账号）；若用了 CloudFront Functions / Lambda@Edge 改写路径，换算出的地址可能不对，预热时会如实报失败。`;
+    $("dist").innerHTML=dists.length?dists.map(d=>`<option value="${esc(d.id)}">${esc((d.aliases[0]||d.domain)+" · "+d.id+(d.enabled?"":"（已停用）"))}</option>`).join(""):'<option value="">本账号没有 CloudFront 分发</option>';
+    fillHosts();
+  }catch(e){$("dist").innerHTML=`<option value="">${esc(e.message)}</option>`}
+}
+function fillHosts(){const d=(dists||[]).find(x=>x.id===$("dist").value);$("host").innerHTML=d?[...d.aliases,d.domain].map(h=>`<option>${esc(h)}</option>`).join(""):""}
+$("dist").onchange=fillHosts;
+const dsrc=()=>document.querySelector("input[name=dsrc]:checked").value;
+document.querySelectorAll("input[name=dsrc]").forEach(r=>r.onchange=()=>{const m=dsrc()==="manual";$("dPick").classList.toggle("hidden",m);$("dManual").classList.toggle("hidden",!m);$("preCard").classList.add("hidden");pending=null;updateMap()});
+// 宽松识别客户粘贴的内容：https://域名/…、s3://桶、桶.s3.区域.amazonaws.com（CloudFront「源域」）
+const cleanHost=v=>v.trim().replace(/^https?:\/\//i,"").split(/[\/?#]/)[0].toLowerCase();
+const cleanBucket=v=>{v=v.trim().replace(/^https?:\/\//i,"").replace(/^s3:\/\//i,"").split("/")[0];const m=v.match(/^(.+?)\.s3(?:-website)?(?:[.-][a-z0-9-]+)?\.amazonaws\.com(?:\.cn)?$/i);return(m?m[1]:v).toLowerCase()};
+const cleanPath=v=>{v=v.trim().replace(/^\/+|\/+$/g,"");return v?"/"+v:""};
+function dirSource(){return dsrc()==="manual"?{manual:{host:cleanHost($("mHost").value),bucket:cleanBucket($("mBucket").value),originPath:cleanPath($("mOpath").value)}}:{distribution:$("dist").value,host:$("host").value}}
+function updateMap(){
+  const el=$("mapPreview");if(dsrc()!=="manual"){el.style.display="none";return}
+  const m=dirSource().manual;let d=$("dir").value.trim()||"/";if(!d.startsWith("/"))d="/"+d;if(!d.endsWith("/"))d+="/";
+  if(!m.host||!m.bucket){el.style.display="none";return}
+  el.style.display="block";
+  el.innerHTML=`将列出：s3://${esc(m.bucket)}/${esc((m.originPath?m.originPath.slice(1)+"/":"")+d.slice(1))}…<br>预热地址：https://${esc(m.host)}${esc(d)}…`;
+}
+["mHost","mBucket","mOpath","dir"].forEach(id=>$(id).addEventListener("input",updateMap));
+["mHost","mBucket","mOpath"].forEach(id=>$(id).addEventListener("blur",()=>{const f={mHost:cleanHost,mBucket:cleanBucket,mOpath:cleanPath}[id];$(id).value=f($(id).value);updateMap()}));
+function showPolicy(e){
+  if(!e.data||!e.data.policy)return false;
+  $("formErr").innerHTML=`${esc(e.message)}<pre class="mono" style="white-space:pre-wrap;background:var(--bg);border:1px solid var(--line);padding:8px;border-radius:6px;color:var(--text);font-size:12px">${esc(e.data.policy)}</pre><button id="copyPolicy">复制策略</button> <span class="muted">在 S3 控制台打开存储桶 ${esc(e.data.bucket)} →「权限」→「存储桶策略」，把这段加进 Statement 里。</span>`;
+  $("copyPolicy").onclick=()=>navigator.clipboard.writeText(e.data.policy).then(()=>{$("copyPolicy").textContent="已复制"});
+  return true;
+}
+async function dirPreview(f){
+  const src=dirSource();
+  const j=await api("/api/dir/preview",{...src,dir:$("dir").value,headers:f.headers});
+  pending={...f,kind:"dir",...src,dir:j.dir};
+  const show=j.files.slice(0,50),cnt=j.file_count??j.files.length;
+  $("preBody").innerHTML=show.map(x=>`<tr><td class="mono">${esc(x.url)}</td><td>${x.warn?`<span style="color:var(--warn)" title="${esc(x.warn)}">⚠ 可能超时</span>`:"✅ 可预热"}</td><td>${fmt(x.size)}</td></tr>`).join("")
+    +(cnt>show.length?`<tr><td colspan="3" class="muted">… 另有 ${cnt-show.length} 个文件</td></tr>`:"")
+    +j.skipped.map(x=>`<tr><td class="mono">${esc(x.url)}</td><td><span class="err">✗ 跳过：${esc(x.reason)}</span></td><td>${x.size!=null?fmt(x.size):"-"}</td></tr>`).join("")
+    +(j.skipped_count>j.skipped.length?`<tr><td colspan="3" class="muted">… 另有 ${j.skipped_count-j.skipped.length} 个跳过</td></tr>`:"");
+  const nreg=f.mode==="economy"?1:cfg.regions.filter(r=>r.ready).length;
+  const n=cnt*nreg*f.encodings.length;
+  $("estimate").innerHTML=`目录 <b class="mono">${esc(j.dir)}</b>（存储桶 ${esc(j.bucket)}）共 <b>${cnt}</b> 个文件、${fmt(j.total_bytes)}${j.sample&&!j.sample.ok?`<br><span class="err">⚠ 抽查第一个文件失败：${esc(j.sample.error)}。可能是访问域名、源站路径填错，或分发改写了路径。仍可执行，失败的文件会如实列出。</span><br>`:""}${j.skipped_count?`，跳过 ${j.skipped_count} 个`:""}。${j.warn_count?`<br><span style="color:var(--warn)">⚠ 其中 ${j.warn_count} 个文件按以往实测速度可能在 ${Math.round(cfg.workerTimeout/60)} 分钟内下载不完（仍会尝试，下载不完会如实报失败；可调大预热函数内存）。</span><br>`:""}将从 <b>${nreg}</b> 个区域 × <b>${f.encodings.length}</b> 种压缩格式预热，共 <b>${n}</b> 次完整下载，预计产生 CloudFront 流量最多约 <b>${fmt(j.total_bytes*nreg*f.encodings.length)}</b>（按未压缩大小估算）。<br><span class="muted">后台分批执行，1 分钟内开始，不需要开着本页面；进度在右侧「目录任务」查看。流量按你 AWS 账号的 CloudFront 费率计入你自己的账单。</span>`;
+  $("warmBtn").textContent="立即开始";
+}
+$("precheckBtn").onclick=async()=>{
+  $("formErr").textContent="";$("resCard").classList.add("hidden");$("warmBtn").textContent="立即预热";
+  const f=form();
+  if(srcKind()==="dir"){
+    if(dsrc()==="pick"&&!$("dist").value){$("formErr").textContent="请选择 CloudFront 分发；分发不在本账号时选「手动填写」";return}
+    if(dsrc()==="manual"&&(!$("mHost").value.trim()||!$("mBucket").value.trim())){$("formErr").textContent="请填写访问域名和存储桶名称";return}
+    busy(true,"列出文件中…");
+    try{await dirPreview(f);$("warmBtn").disabled=false;$("schedBtn").disabled=false;$("schedMsg").textContent="";
+      if(!$("schedAt").value){const d=new Date(Date.now()+3600e3);d.setMinutes(0,0,0);$("schedAt").value=localInput(d)}
+      $("preCard").classList.remove("hidden")}
+    catch(e){if(!showPolicy(e))$("formErr").textContent=e.message}finally{busy(false)}
+    return;
+  }
+  if(!f.urls.length){$("formErr").textContent="请至少填一个地址";return}
+  busy(true,"预检中…");
+  try{
+    const j=await api("/api/precheck",{urls:f.urls,headers:f.headers});
+    const ok=j.precheck.filter(p=>p.ok),bad=j.precheck.filter(p=>!p.ok),warns=ok.filter(p=>p.warn);
+    const bg=ok.length>cfg.syncMaxUrls;
+    pending=bg?{...f,urls:ok.map(p=>p.url)}:f;
+    const rows=[...bad,...warns,...ok.filter(p=>!p.warn)],shown=rows.slice(0,100);
+    $("preBody").innerHTML=shown.map(p=>`<tr><td class="mono">${esc(p.url)}</td><td>${!p.ok?`<span class="err">✗ ${esc(p.error)}</span>`:p.warn?`<span style="color:var(--warn)">⚠ ${esc(p.warn)}</span>`:"✅ 可预热"}</td><td>${p.ok?fmt(p.size):"-"}</td></tr>`).join("")
+      +(rows.length>shown.length?`<tr><td colspan="3" class="muted">… 另有 ${rows.length-shown.length} 个地址未显示</td></tr>`:"");
+    const nreg=f.mode==="economy"?1:cfg.regions.filter(r=>r.ready).length;
+    const known=ok.reduce((s,p)=>s+(p.size||0),0),unknown=ok.filter(p=>p.size==null).length;
+    const n=ok.length*nreg*f.encodings.length;
+    $("estimate").innerHTML=ok.length?`将从 <b>${nreg}</b> 个区域 × <b>${f.encodings.length}</b> 种压缩格式预热 <b>${ok.length}</b> 个地址，共 <b>${n}</b> 次完整下载，预计产生 CloudFront 流量最多约 <b>${fmt(known*nreg*f.encodings.length)}</b>（按未压缩大小估算，开启压缩时实际更少${unknown?`；另有 ${unknown} 个地址大小未知，未计入`:""}）。<br>${bad.length?`<br>${bad.length} 个地址未通过预检，不会预热。`:""}${warns.length?`<br><span style="color:var(--warn)">⚠ ${warns.length} 个地址可能在 ${Math.round(cfg.workerTimeout/60)} 分钟内下载不完（仍会尝试，下载不完会如实报失败）。</span>`:""}${bg?`<br><b>地址较多，将转为后台分批执行</b>，1 分钟内开始，不需要开着页面，进度见右侧「后台任务」。`:""}<br><span class="muted">流量按你 AWS 账号的 CloudFront 费率计入你自己的账单；未开 Origin Shield 时回源次数也会随区域数增加。</span>`:`<span class="err">没有可预热的地址。</span>`;
+    $("warmBtn").disabled=!ok.length;$("schedBtn").disabled=!ok.length;$("schedMsg").textContent="";
+    if(!$("schedAt").value){const d=new Date(Date.now()+3600e3);d.setMinutes(0,0,0);$("schedAt").value=localInput(d)}
+    $("preCard").classList.remove("hidden");
+  }catch(e){$("formErr").textContent=e.message}finally{busy(false)}
+};
+$("cancelBtn").onclick=()=>{$("preCard").classList.add("hidden");pending=null};
+$("warmBtn").onclick=async()=>{
+  if(!pending)return;
+  if(pending.kind==="dir"){busy(true,"创建目录任务…");
+    try{const j=await api("/api/dir/jobs",pending);$("preCard").classList.add("hidden");pending=null;
+      $("formErr").innerHTML=`<span style="color:var(--ok)">目录任务已创建（${j.job.total} 个文件），1 分钟内开始，进度见右侧「后台任务」。</span>`;loadDirJobs()}
+    catch(e){$("schedMsg").innerHTML=`<span class="err">${esc(e.message)}</span>`}finally{busy(false)}
+    return;
+  }$("preCard").classList.add("hidden");busy(true,"预热中，大文件可能需要几分钟，请勿关闭页面…");
+  try{const j=await api("/api/warm",pending);
+    if(j.job){$("formErr").innerHTML=`<span style="color:var(--ok)">已转为后台任务（${j.job.total} 个地址），1 分钟内开始，进度见右侧「后台任务」。</span>`;loadDirJobs();return}
+    if(j.error&&!j.results.length)throw new Error(j.error);render(j.summary,j.results);loadHistory()}
+  catch(e){$("formErr").textContent=e.message}finally{busy(false);pending=null}
+};
+function busy(b,msg){$("precheckBtn").disabled=b;$("warmBtn").disabled=b;$("schedBtn").disabled=b;$("busy").textContent=b?msg:""}
+const pad=n=>String(n).padStart(2,"0");
+const localInput=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+$("tz").textContent=Intl.DateTimeFormat().resolvedOptions().timeZone||"本地时间";
+$("schedBtn").onclick=async()=>{
+  if(!pending)return;const v=$("schedAt").value;if(!v){$("schedMsg").innerHTML='<span class="err">请选择预定时间</span>';return}
+  const at=Math.floor(new Date(v).getTime()/1000);
+  busy(true,"保存预定…");
+  if(pending.kind==="dir"){
+    try{const j=await api("/api/dir/jobs",{...pending,at});$("preCard").classList.add("hidden");pending=null;
+      $("formErr").innerHTML=`<span style="color:var(--ok)">已预定目录任务（${j.job.total} 个文件）：${new Date(j.job.start_at*1000).toLocaleString()} 开始，进度见右侧「后台任务」。</span>`;loadDirJobs()}
+    catch(e){$("schedMsg").innerHTML=`<span class="err">${esc(e.message)}</span>`}finally{busy(false)}
+    return;
+  }
+  try{const j=await api("/api/schedules",{...pending,at});$("preCard").classList.add("hidden");pending=null;
+    $("formErr").textContent="";$("busy").textContent="";
+    if(j.job){$("formErr").innerHTML=`<span style="color:var(--ok)">已预定后台任务（${j.job.total} 个地址）：${new Date(j.job.start_at*1000).toLocaleString()} 开始，进度见右侧「后台任务」。</span>`;loadDirJobs();return}
+    $("formErr").innerHTML=`<span style="color:var(--ok)">已预定：${new Date(j.schedule.at*1000).toLocaleString()} 执行，可在右侧「预定任务」查看或取消。</span>`;loadSchedules()}
+  catch(e){$("schedMsg").innerHTML=`<span class="err">${esc(e.message)}</span>`}finally{busy(false)}
+};
+const SCHED={pending:"待执行",running:"执行中",done:"已完成",failed:"失败",cancelled:"已取消"};
+async function loadSchedules(){
+  try{
+    const j=await api("/api/schedules");
+    $("schedules").innerHTML=j.schedules.length?j.schedules.map(x=>{
+      const st=x.status==="done"?`已完成 <span class="${x.ok===x.total?"":"err"}">${x.ok}/${x.total}</span>`:x.status==="failed"?`<span class="err">失败</span>`:esc(SCHED[x.status]||x.status);
+      const act=x.status==="pending"?` <button class="schedCancel" data-id="${esc(x.id)}" style="padding:2px 8px;font-size:12px">取消</button>`:"";
+      const open=x.run_id?` data-run="${esc(x.run_id)}"`:"";
+      return `<div class="hist"${open}><div>${new Date(x.at*1000).toLocaleString()} · ${st}${act}</div><div class="muted">${x.urls.length} 个地址 · ${x.mode==="economy"?"经济":"全覆盖"}${x.error?` · <span class="err">${esc(x.error)}</span>`:""}</div></div>`}).join(""):"暂无预定";
+    document.querySelectorAll("#schedules .hist[data-run]").forEach(el=>el.onclick=async e=>{if(e.target.tagName==="BUTTON")return;try{const r=await api("/api/history/"+el.dataset.run);render(r.summary,r.results)}catch(err){alert(err.message)}});
+    document.querySelectorAll(".schedCancel").forEach(b=>b.onclick=async()=>{if(!confirm("确定取消这个预定？"))return;try{await api("/api/schedules/"+b.dataset.id,null,"DELETE");loadSchedules()}catch(e){alert(e.message)}});
+  }catch(e){$("schedules").innerHTML=`<span class="err">${esc(e.message)}</span>`}
+}
+async function loadDirJobs(){
+  try{
+    const j=await api("/api/dir/jobs");
+    $("dirJobs").innerHTML=j.jobs.length?j.jobs.map(x=>{
+      const pct=x.total?Math.round(x.cursor*100/x.total):0;
+      const when=x.status==="pending"?`${new Date(x.start_at*1000).toLocaleString()} 开始`:new Date(x.created*1000).toLocaleString();
+      const st=x.status==="running"||x.status==="pending"&&x.cursor?`执行中 ${pct}%`:x.status==="done"?`已完成`:x.status==="failed"?`<span class="err">失败</span>`:esc(SCHED[x.status]||x.status);
+      const act=(x.status==="pending"||x.status==="running")?` <button class="dirCancel" data-id="${esc(x.id)}" style="padding:2px 8px;font-size:12px">取消</button>`:"";
+      const bar=x.status!=="pending"||x.cursor?`<div style="height:4px;background:var(--line);border-radius:2px;margin:4px 0"><div style="height:4px;width:${pct}%;background:var(--pri);border-radius:2px"></div></div>`:"";
+      return `<div class="hist dirJob" data-id="${esc(x.id)}"><div><span class="mono">${esc(x.label)}</span> · ${st}${act}</div>${bar}<div class="muted">${when} · ${x.cursor}/${x.total} 个文件 · 成功 ${x.files_ok}${x.files_failed?` · <span class="err">失败 ${x.files_failed}</span>`:""}${x.verify&&x.downloads?` · 复查命中 ${x.hits}/${x.downloads}`:""} · ${fmt(x.bytes)}${x.error?` · <span class="err">${esc(x.error)}</span>`:""}</div></div>`}).join(""):"暂无后台任务";
+    document.querySelectorAll(".dirJob").forEach(el=>el.onclick=async e=>{if(e.target.tagName==="BUTTON")return;
+      try{const r=(await api("/api/dir/jobs/"+el.dataset.id)).job;
+        $("resCard").classList.remove("hidden");$("resTitle").textContent=`后台任务 · ${r.label}`;
+        $("resSummary").innerHTML=`${esc(SCHED[r.status]||r.status)}：已处理 <b>${r.cursor}/${r.total}</b> 个文件，成功 <b>${r.files_ok}</b>，失败 <b>${r.files_failed}</b>，实际下载 <b>${fmt(r.bytes)}</b>${r.verify&&r.downloads?`；复查命中缓存 <b>${r.hits}/${r.downloads}</b> 次下载（未命中通常是文件设置了不缓存，或缓存时间为 0）`:""}${r.error?`；<span class="err">${esc(r.error)}</span>`:""}`;
+        $("resGrid").innerHTML=r.failures.length?`<table><thead><tr><th>失败的文件</th><th>原因</th></tr></thead><tbody>${r.failures.map(f=>`<tr><td class="mono">${esc(f.url)}</td><td class="err">${esc(f.error)}</td></tr>`).join("")}</tbody></table>${r.files_failed>r.failures.length?`<p class="muted">只显示前 ${r.failures.length} 条</p>`:""}`:"<p class='muted'>没有失败的文件。</p>";
+        $("resCard").scrollIntoView({behavior:"smooth"})}catch(err){alert(err.message)}});
+    document.querySelectorAll(".dirCancel").forEach(b=>b.onclick=async()=>{if(!confirm("确定取消这个任务？已经发出的那一批会跑完，之后不再继续。"))return;try{await api("/api/dir/jobs/"+b.dataset.id,null,"DELETE");loadDirJobs()}catch(e){alert(e.message)}});
+  }catch(e){$("dirJobs").innerHTML=`<span class="err">${esc(e.message)}</span>`}
+}
+setInterval(()=>{if(!$("app").classList.contains("hidden")){loadSchedules();loadHistory();loadDirJobs()}},30000);
+
+function render(s,results){
+  $("resCard").classList.remove("hidden");
+  $("resTitle").textContent="结果 · "+new Date(s.at*1000).toLocaleString()+(s.trigger==="scheduled"?" · 预定执行":"");
+  $("resSummary").innerHTML=`成功 <b>${s.ok}/${s.total}</b>，实际下载 <b>${fmt(s.bytes)}</b>，用时 ${s.seconds} 秒`+(s.skipped&&s.skipped.length?`；跳过 ${s.skipped.length} 个未通过预检的地址`:"");
+  if(!results){$("resGrid").innerHTML="<p class='muted'>该记录太大，只保存了摘要。</p>";return}
+  const regs=s.regions,rows={};
+  for(const x of results){const k=x.url+"\n"+x.encoding;(rows[k]=rows[k]||{})[x.region]=x}
+  let h="<table><thead><tr><th>地址</th><th>压缩格式</th>"+regs.map(r=>`<th>${esc(rname(r))}</th>`).join("")+"</tr></thead><tbody>";
+  for(const k of Object.keys(rows)){
+    const [u,enc]=k.split("\n");h+=`<tr><td class="mono">${esc(u)}</td><td class="muted">${esc(enc)}</td>`;
+    for(const r of regs){
+      const x=rows[k][r];if(!x){h+="<td>-</td>";continue}
+      const hit=/hit from cloudfront/i.test(x.verify_x_cache||"");
+      const cls=!x.ok?"c-bad":hit?"c-hit":"c-ok",label=!x.ok?"失败":hit?"已命中":"已下载";
+      const tip=[`节点：${x.pop||"-"}`,`状态：${x.status??"-"}`,`下载：${fmt(x.bytes||0)}`,`首次：${x.x_cache||"-"}`,x.verify_x_cache?`复查：${x.verify_x_cache}`:"",x.elapsed_ms?`耗时：${x.elapsed_ms} ms`:"",x.error?`原因：${x.error}`:""].filter(Boolean).join("\n");
+      h+=`<td><span class="cell ${cls}" title="${esc(tip)}">${label}</span><div class="muted mono" style="font-size:11px">${esc(x.pop||"")}</div></td>`;
+    }
+    h+="</tr>";
+  }
+  $("resGrid").innerHTML=h+"</tbody></table>";
+  $("resCard").scrollIntoView({behavior:"smooth"});
+}
+
+async function loadHistory(){
+  try{
+    const j=await api("/api/history");
+    $("history").innerHTML=j.runs.length?j.runs.map(s=>`<div class="hist" data-id="${esc(s.id)}"><div>${new Date(s.at*1000).toLocaleString()}</div><div class="muted">${s.trigger==="scheduled"?"⏰ 预定 · ":""}${s.urls.length} 个地址 · ${s.mode==="economy"?"经济":"全覆盖"} · <span class="${s.ok===s.total?"":"err"}">${s.ok}/${s.total}</span> · ${fmt(s.bytes)}</div></div>`).join(""):"暂无记录";
+    document.querySelectorAll(".hist").forEach(el=>el.onclick=async()=>{try{const r=await api("/api/history/"+el.dataset.id);render(r.summary,r.results)}catch(e){alert(e.message)}});
+  }catch(e){$("history").innerHTML=`<span class="err">${esc(e.message)}</span>`}
+}
+show(!!sessionStorage.getItem("cfw"));
+</script>
+</body>
+</html>
